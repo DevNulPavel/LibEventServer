@@ -13,10 +13,12 @@
 
 using namespace std;
 
-typedef unique_ptr<evhttp, decltype(&evhttp_free)> ServerPtr;
+typedef std::unique_ptr<event_base, decltype(&event_base_free)>  EventHandler;
+typedef std::unique_ptr<evhttp, decltype(&evhttp_free)> ServerPtr;
+
 
 int simpleOneThreadServer(){
-    // Инициализация цикла
+    // Инициализация цикла, только для однопоточного режима
     if (!event_init()) {
         std::cerr << "Failed to init libevent." << std::endl;
         return -1;
@@ -36,18 +38,21 @@ int simpleOneThreadServer(){
     }
     
     // коллбек запроса
-    void (*receivedRequest)(evhttp_request *req, void *) = [](evhttp_request *req, void *){
+    void (*receivedRequest)(evhttp_request*, void*) = [](evhttp_request* request, void* data){
         // выходной буффер запроса
-        auto* outBuf = evhttp_request_get_output_buffer(req);
+        evbuffer* outBuf = evhttp_request_get_output_buffer(request);
         if (!outBuf){
             return;
         }
         
+        // тестовая задержка
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        
         // Выходные данные
-        evbuffer_add_printf(outBuf, "<html><body><center><h1>Hello Wotld!</h1></center></body></html>");
+        evbuffer_add_printf(outBuf, "<html><body><center><h1>Hello Wotld! TestData!!!</h1></center></body></html>");
         
         // отвечаем на запрос
-        evhttp_send_reply(req, HTTP_OK, "", outBuf);
+        evhttp_send_reply(request, HTTP_OK, "", outBuf);
     };
     
     // включаем обработчик вызовов
@@ -64,7 +69,7 @@ int simpleOneThreadServer(){
 int multithreadedServer() {
     char const serverAddress[] = "127.0.0.1";
     std::uint16_t const serverPort = 5555;
-    int const threadsCount = 4;
+    int const threadsCount = 8;
     
     try
     {
@@ -75,6 +80,9 @@ int multithreadedServer() {
             if (!outBuf){
                 return;
             }
+            
+            // тестовая задержка
+            std::this_thread::sleep_for(std::chrono::milliseconds(40));
             
             // Выходные данные
             evbuffer_add_printf(outBuf, "<html><body><center><h1>Hello Wotld!</h1></center></body></html>");
@@ -89,35 +97,43 @@ int multithreadedServer() {
         evutil_socket_t socket = -1;
         
         // Функция в потоке
-        auto ThreadFunc = [&] (){
+        auto threadFunc = [&] (){
             try {
-                std::unique_ptr<event_base, decltype(&event_base_free)> eventBase(event_base_new(), &event_base_free);
+                // каждый поток имеет свой объект обработки событий, в однопотоном варианте - это event_init
+                EventHandler eventBase(event_base_new(), &event_base_free);
                 if (!eventBase){
                     throw std::runtime_error("Failed to create new base_event.");
                 }
                 
+                // Создаем сервер с обработчиком событий
                 ServerPtr eventHttp(evhttp_new(eventBase.get()), &evhttp_free);
                 if (!eventHttp){
                     throw std::runtime_error("Failed to create new evhttp.");
                 }
                 
+                // привязываем функцию обработчик к серверу
                 evhttp_set_gencb(eventHttp.get(), receivedRequest, nullptr);
                 
+                // если у нас есть уже сокет или его еще нету
                 if (socket == -1){
-                    auto* BoundSock = evhttp_bind_socket_with_handle(eventHttp.get(), serverAddress, serverPort);
-                    if (!BoundSock){
+                    // связываем сервер с адресом и портом
+                    auto* bindedSocket = evhttp_bind_socket_with_handle(eventHttp.get(), serverAddress, serverPort);
+                    if (!bindedSocket){
                         throw std::runtime_error("Failed to bind server socket.");
                     }
                     
-                    // сокет создается
-                    if ((socket = evhttp_bound_socket_get_fd(BoundSock)) == -1){
+                    // сокет создается на основании связки
+                    socket = evhttp_bound_socket_get_fd(bindedSocket);
+                    if (socket == -1){
                         throw std::runtime_error("Failed to get server socket for next instance.");
                     }
                 }
-                else
-                {
-                    if (evhttp_accept_socket(eventHttp.get(), socket) == -1)
+                else {
+                    //
+                    int status = evhttp_accept_socket(eventHttp.get(), socket);
+                    if (status == -1){
                         throw std::runtime_error("Failed to bind server socket for new instance.");
+                    }
                 }
                 
                 for ( ; isRunning ; ) {
@@ -150,7 +166,7 @@ int multithreadedServer() {
         threads.reserve(threadsCount);
         
         for (int i = 0 ; i < threadsCount ; ++i) {
-            ThreadPtr Thread(new std::thread(ThreadFunc), threadDeleter);
+            ThreadPtr Thread(new std::thread(threadFunc), threadDeleter);
             
             // задержка старта следующего потока
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
