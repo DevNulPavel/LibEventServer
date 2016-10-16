@@ -213,7 +213,12 @@ int tcpServer() {
         event_base* base = evconnlistener_get_base(listener);
         
         // При обработке запроса нового соединения необходимо создать для него объект bufferevent
-        bufferevent* buf_ev = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE );
+        int bufferEventFlags = BEV_OPT_CLOSE_ON_FREE /*| BEV_OPT_DEFER_CALLBACKS | BEV_OPT_UNLOCK_CALLBACKS | BEV_OPT_THREADSAFE*/;
+        bufferevent* buf_ev = bufferevent_socket_new(base, fd, bufferEventFlags);
+        if (buf_ev == nullptr) {
+            fprintf(stderr, "Ошибка при создании объекта bufferevent.\n");
+            return;
+        }
         
         // Функция обратного вызова для события: данные готовы для чтения в buf_ev
         auto echo_read_cb = [](bufferevent* buf_ev, void *arg) {
@@ -222,7 +227,7 @@ int tcpServer() {
             evbuffer* buf_output = bufferevent_get_output(buf_ev);
             
             // тестовая задержка
-            //std::this_thread::sleep_for(std::chrono::milliseconds(40));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
             
             // Данные просто копируются из буфера ввода в буфер вывода
             evbuffer_add_printf(buf_output, "You write: ");
@@ -236,8 +241,20 @@ int tcpServer() {
         
         // коллбек обработки ивента
         auto echo_event_cb = [](bufferevent* buf_ev, short events, void *arg){
-            if(events & BEV_EVENT_ERROR ){
+            if(events & BEV_EVENT_READING){
+                perror("Ошибка во время чтения bufferevent");
+            }
+            if(events & BEV_EVENT_WRITING){
+                perror("Ошибка во время записи bufferevent");
+            }
+            if(events & BEV_EVENT_ERROR){
                 perror("Ошибка объекта bufferevent");
+            }
+            if(events & BEV_EVENT_TIMEOUT){
+                perror("Таймаут bufferevent");
+            }
+            if(events & BEV_EVENT_CONNECTED){
+                perror("Соединение в bufferevent");
             }
             if(events & (BEV_EVENT_EOF | BEV_EVENT_ERROR)){
                 bufferevent_free(buf_ev);
@@ -259,7 +276,14 @@ int tcpServer() {
     };
     
     // коллбек таймаута чтения
-    auto updateEvent = [](evutil_socket_t socketFd, short event, void *arg){
+    auto updateEvent = [](evutil_socket_t socketFd, short event, void* arg){
+        const char* data = reinterpret_cast<const char*>(arg);
+        printf( "Сокет %d - активные события: %s%s%s%s; %s\n", (int)socketFd,
+               (event & EV_TIMEOUT) ? " таймаут" : "",
+               (event & EV_READ)    ? " чтение"  : "",
+               (event & EV_WRITE)   ? " запись"  : "",
+               (event & EV_SIGNAL)  ? " сигнал"  : "", data);
+        /*
         if (event & EV_TIMEOUT) {
             std::cout << "Таймаут события" << std::endl;
         } else if (event & EV_READ) {
@@ -267,6 +291,7 @@ int tcpServer() {
         } else if (event & EV_PERSIST) {
             std::cout << "Таймаут PERSIST" << std::endl;
         }
+        */
     };
 
     //////////////////////////////////////////////////
@@ -275,16 +300,17 @@ int tcpServer() {
     // обработчик событий
     event_base* base = event_base_new();
     if(!base){
-        fprintf( stderr, "Ошибка при создании объекта event_base.\n" );
+        fprintf(stderr, "Ошибка при создании объекта event_base.\n" );
         return -1;
     }
     
     // коллбек-ивент для периодических событий
     timeval tv;
-    tv.tv_sec = 1;
+    tv.tv_sec = 5;
     tv.tv_usec = 0;
-    event* updateEventObject = event_new(base, fileno(stdin), EV_TIMEOUT | EV_READ | EV_PERSIST, updateEvent, NULL);
+    event* updateEventObject = event_new(base, fileno(stdin), EV_TIMEOUT | EV_PERSIST, updateEvent, NULL);
     event_add(updateEventObject, &tv);
+    
     
     // адрес
     const int port = 5555;
