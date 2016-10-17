@@ -22,7 +22,33 @@ if(CLANG_FOUND)
 	# set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}  -fsanitize=address -fno-omit-frame-pointer -Qunused-arguments")
 endif(CLANG_FOUND)
 
+# Ищем Boost
+set(Boost_USE_STATIC_LIBS OFF) 
+set(Boost_USE_MULTITHREADED ON)  
+set(Boost_USE_STATIC_RUNTIME OFF)
+set(BOOST_COMPONENTS thread system)
+find_package(Boost 1.58.0 REQUIRED COMPONENTS  ${BOOST_COMPONENTS})
+if(Boost_FOUND)
+	include_directories(${Boost_INCLUDE_DIR})
+	link_directories(${Boost_LIBRARY_DIRS})
+	message("Boost FOUND")
+else(Boost_FOUND)
+	message(FATAL_ERROR "No BOOST")
+endif(Boost_FOUND)
+
 # Поиск библиотеки protobuf
+find_package(Protobuf REQUIRED)
+if(PROTOBUF_FOUND)
+	include_directories(${PROTOBUF_INCLUDE_DIRS})
+	message("ProtoBuf FOUND")
+else(PROTOBUF_FOUND)
+	message(FATAL_ERROR "No ProtoBuf")
+endif(PROTOBUF_FOUND)
+
+# Поиск библиотеки потоков
+find_package(Threads REQUIRED)
+
+# Поиск библиотеки LibEvent
 find_package(LibEvent REQUIRED)
 if(LibEvent_FOUND)
 	include_directories(${LIBEVENT_INCLUDE_DIR})
@@ -30,7 +56,6 @@ if(LibEvent_FOUND)
 else(LibEvent_FOUND)
 	message(FATAL_ERROR "No ProtoBuf")
 endif(LibEvent_FOUND)
-
 
 # Sanitizer
 if(CLANG_FOUND)
@@ -51,8 +76,13 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -Wall")
 
 # Список исходников
 set (HEADERS 
-		)
+		"SingleThreadedHTTP.h"
+		"MultiThreadedHTTP.h"
+		"SingleThreadedTCP.h")
 set (SOURCES
+		"SingleThreadedHTTP.cpp"
+		"MultiThreadedHTTP.cpp"
+		"SingleThreadedTCP.cpp"
 		"main.cpp")
 
 # создаем группу, чтобы заголовочники и исходники были в одной папке
@@ -66,7 +96,7 @@ source_group("Sources" FILES ${HEADERS} ${SOURCES})
 add_executable(${PROJECT} ${APP_TYPE} ${HEADERS} ${SOURCES})
 
 # линкуемые библиотеки
-target_link_libraries(${PROJECT} ${LIBEVENT_LIB})
+target_link_libraries(${PROJECT} ${CMAKE_THREAD_LIBS_INIT} ${LIBEVENT_LIB} ${Boost_LIBRARIES} ${PROTOBUF_LIBRARIES})
 
 # Sanitizer
 if(CLANG_FOUND)
