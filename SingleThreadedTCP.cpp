@@ -97,7 +97,7 @@ public:
         return _queue.empty();
     }
 
-    void callbackInMainLoop(const Task& task){        
+    void callbackInMainLoop(const Task& task, evutil_socket_t fd){
         // коллбек таймаута чтения
         auto updateEvent = [](evutil_socket_t socketFd, short flags, void* arg){
             Task* taskCopy = static_cast<Task*>(arg);
@@ -113,11 +113,11 @@ public:
         Task* taskCopy = new Task(task);
         
         // TODO: проверить потокобезопасность
-        timeval time;
-        time.tv_sec = 0;
-        time.tv_usec = 0;
-        event* updateEventObject = event_new(_base, fileno(stdin), 0, updateEvent, taskCopy);
-        event_add(updateEventObject, &time);
+        event* updateEventObject = event_new(_base, fd, EV_WRITE | EV_WRITE | EV_ET, updateEvent, taskCopy);
+//        timeval time;
+//        time.tv_sec = 0;
+//        time.tv_usec = 0;
+//        event_add(updateEventObject, &time);
         event_active(updateEventObject, 0, 1);
     }
 
@@ -161,8 +161,9 @@ private:
 //////////////////////////////////////////////////
 class Client: public std::enable_shared_from_this<Client> {
 public:
-    Client(bufferevent* bufferEvent):
-        _bufferEvent(bufferEvent){
+    Client(bufferevent* bufferEvent, evutil_socket_t fd):
+        _bufferEvent(bufferEvent),
+        _fd(fd){
     }
     
     void handleReceivedData(const ServerManagers& managers){
@@ -190,11 +191,13 @@ public:
     
     void startClientTask(const ServerManagers& managers, const std::vector<char>& dataBuffer){
         std::weak_ptr<Client> clientWeakPtr = shared_from_this();
+        evutil_socket_t fd = clientWeakPtr.lock()->_fd;
         
-        Task threadTask = [this, dataBuffer, &managers, clientWeakPtr](){
+        Task threadTask = [this, dataBuffer, &managers, clientWeakPtr, fd](){
             
             // тестовая задержка
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            
             
             // коллбек в главном потоке после завершения
             managers.tasksHandler->callbackInMainLoop([dataBuffer, clientWeakPtr](){
@@ -205,7 +208,7 @@ public:
                     return;
                 }
                 clientWeakPtr.lock()->sendServerAnswer(dataBuffer);
-            });
+            }, fd);
         };
         managers.tasksHandler->addTaskToQueue(threadTask);
     }
@@ -220,14 +223,15 @@ public:
         evbuffer_add(buf_output, data.data(), data.size());
         
         // прочитали/записали все данные из буффера - очистили
-        evbuffer_drain(buf_output, data.size());
+        //evbuffer_drain(buf_output, data.size());
         
         //bufferevent_flush(_bufferEvent, EV_WRITE, bufferevent_flush_mode::BEV_FLUSH);
     }
     
-private:
+public:
     std::mutex _mutex;
     bufferevent* _bufferEvent;
+    evutil_socket_t _fd;
 };
 
 typedef std::shared_ptr<Client> ClientPtr;
@@ -247,12 +251,12 @@ public:
         return nullptr;
     }
     
-    ClientPtr addClient(bufferevent* buffer){
+    ClientPtr addClient(bufferevent* buffer, evutil_socket_t fd){
         LockGuard lock(_mutex);
         
         ClientPtr client = nullptr;
         if (_clients.count(buffer) == 0) {
-            client = std::make_shared<Client>(buffer);
+            client = std::make_shared<Client>(buffer, fd);
             _clients[buffer] = client;
         }else{
             client = _clients[buffer];
@@ -303,7 +307,7 @@ int tcpServer() {
         }
         
         // создание клиента
-        ClientPtr client = managers.clientsManager->addClient(buf_ev);
+        ClientPtr client = managers.clientsManager->addClient(buf_ev, fd);
         
         // Функция обратного вызова для события: данные готовы для чтения в buf_ev
         auto echo_read_cb = [](bufferevent* buf_ev, void *arg) {
@@ -412,6 +416,9 @@ int tcpServer() {
         fprintf(stderr, "Ошибка при создании объекта event_base.\n" );
         return -1;
     }
+    
+    // инициализация многопоточности ??
+    //evthread_make_base_notifiable(base);
     
     // коллбек-ивент для периодических событий
     timeval tv;
