@@ -78,11 +78,13 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -Wall")
 set (HEADERS 
 		"SingleThreadedHTTP.h"
 		"MultiThreadedHTTP.h"
-		"SingleThreadedTCP.h")
+		"SingleThreadedTCP.h"
+		"MultiThreadedTCP.h")
 set (SOURCES
 		"SingleThreadedHTTP.cpp"
 		"MultiThreadedHTTP.cpp"
 		"SingleThreadedTCP.cpp"
+		"MultiThreadedTCP.cpp"
 		"main.cpp")
 
 # создаем группу, чтобы заголовочники и исходники были в одной папке

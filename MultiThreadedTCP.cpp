@@ -1,4 +1,6 @@
-#include "SingleThreadedTCP.h"
+#ifdef DISABLED
+
+#include "MultiThreadedTCP.h"
 // std
 #include <stdexcept>
 #include <iostream>
@@ -202,15 +204,13 @@ private:
 //////////////////////////////////////////////////
 class Client: public std::enable_shared_from_this<Client> {
 public:
-    Client(std::mutex& mutex, bufferevent* bufferEvent, evutil_socket_t fd):
-        _mutex(mutex),
+    Client(bufferevent* bufferEvent, evutil_socket_t fd):
         _bufferEvent(bufferEvent),
         _fd(fd){
     }
     
     void handleReceivedData(const ServerManagers& managers){
-        // блокировка чтения из разных потоков
-        UniqueLock lock(_mutex);
+        LockGuard lock(_mutex);
         
         evbuffer* buf_input = bufferevent_get_input(_bufferEvent);
         //evbuffer* buf_output = bufferevent_get_output(_bufferEvent);
@@ -225,8 +225,6 @@ public:
         // прочитали/записали все данные из буффера - очистили
         evbuffer_drain(buf_input, inputDataLength);
         
-        lock.unlock();
-        
         //std::string inputText(dataBuffer.begin(), dataBuffer.end());
         //printf("Прочитал сервер: %s\n", inputText.c_str());
         
@@ -236,21 +234,17 @@ public:
     }
     
     void startClientTask(const ServerManagers& managers, const std::vector<char>& dataBuffer){
-        UniqueLock lock(_mutex);
         std::weak_ptr<Client> clientWeakPtr = shared_from_this();
         evutil_socket_t fd = clientWeakPtr.lock()->_fd;
-        lock.unlock();
         
         Task threadTask = [this, dataBuffer, &managers, clientWeakPtr, fd](){
             
             // тестовая задержка
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
             
-            UniqueLock lock(_mutex);
             if (clientWeakPtr.expired()) {
                 return;
             }
-            lock.unlock();
             
             // отправка в фоновом потоке
             sendServerAnswer(dataBuffer);
@@ -270,7 +264,6 @@ public:
     }
     
     void sendServerAnswer(const std::vector<char>& data){
-        // блокировка записей из разных потоков
         LockGuard lock(_mutex);
     
         //evbuffer* buf_input = bufferevent_get_input(_bufferEvent);
@@ -288,7 +281,7 @@ public:
     }
     
 public:
-    std::mutex& _mutex;
+    std::mutex _mutex;
     bufferevent* _bufferEvent;
     evutil_socket_t _fd;
 };
@@ -315,7 +308,7 @@ public:
         
         ClientPtr client = nullptr;
         if (_clients.count(buffer) == 0) {
-            client = std::make_shared<Client>(_mutex, buffer, fd);
+            client = std::make_shared<Client>(buffer, fd);
             _clients[buffer] = client;
         }else{
             client = _clients[buffer];
@@ -531,3 +524,5 @@ int tcpServer() {
     
     return 0;
 }
+
+#endif
