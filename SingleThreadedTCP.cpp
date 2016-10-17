@@ -56,14 +56,24 @@ class ServerTasksHandler{
 public:
     ServerTasksHandler(event_base* base, int threadsCount):
         _enabled(true),
-        _base(base) {
+        _base(base),
+        _updateEventObject(nullptr) {
         
+        createMainLoopCallbacksHandler();
+        creatThreads(threadsCount);
+    }
+    
+    ~ServerTasksHandler(){
+        event_free(_updateEventObject);
+    }
+    
+    void creatThreads(int threadsCount){
         // не дает завершиться потокам при удалении объекта
         auto threadDeleteLock = [&] (std::thread *t) {
             t->join();
             delete t;
         };
-            
+        
         // резервируем память под указатели потоков
         _threads.reserve(threadsCount);
         
@@ -80,54 +90,69 @@ public:
         }
     }
 
+    void createMainLoopCallbacksHandler(){
+        // коллбек таймаута чтения
+        auto updateEvent = [](evutil_socket_t socketFd, short flags, void* arg){
+            ServerTasksHandler* thisObj = (static_cast<ServerTasksHandler*>(arg));
+            TasksQueue& queue = thisObj->_mainLoopQueue;
+            std::mutex& mutex = thisObj->_mutex;
+            
+            // сброс
+            UniqueLock lock(mutex);
+            if (queue.size() == 0) {
+                return;
+            }
+            TasksQueue tasksCopy = queue;
+            queue = TasksQueue();
+            lock.unlock();
+            
+            while (tasksCopy.size() > 0) {
+                Task& task = tasksCopy.front();
+                task();
+                tasksCopy.pop();
+            }
+        };
+        
+        _updateEventObject = event_new(_base, 0, EV_PERSIST | EV_TIMEOUT, updateEvent, this);
+        timeval time;
+        time.tv_sec = 0;
+        time.tv_usec = 50;
+        event_add(_updateEventObject, &time);
+    }
+
     void addTaskToQueue(const Task& task){
         // объект блокировки
         UniqueLock locker(_mutex);
-        _queue.push(task);
+        _threadQueue.push(task);
         _conditionVariable.notify_one();
     }
 
     size_t getTaskCount(){
         UniqueLock locker(_mutex);
-        return _queue.size();
+        return _threadQueue.size();
     }
     
     bool isEmpty(){
         UniqueLock locker(_mutex);
-        return _queue.empty();
+        return _threadQueue.empty();
     }
 
-    void callbackInMainLoop(const Task& task, evutil_socket_t fd){
-        // коллбек таймаута чтения
-        auto updateEvent = [](evutil_socket_t socketFd, short flags, void* arg){
-            Task* taskCopy = static_cast<Task*>(arg);
-            
-            if ((*taskCopy) != nullptr) {
-                Task& task = *taskCopy;
-                task();
-            }
-            
-            delete taskCopy;
-        };
+    void callbackInMainLoop(const Task& task){
+        UniqueLock locker(_mutex);
+        _mainLoopQueue.push(task);
         
-        Task* taskCopy = new Task(task);
-        
-        // TODO: проверить потокобезопасность
-        event* updateEventObject = event_new(_base, fd, EV_WRITE | EV_WRITE | EV_ET, updateEvent, taskCopy);
-//        timeval time;
-//        time.tv_sec = 0;
-//        time.tv_usec = 0;
-//        event_add(updateEventObject, &time);
-        event_active(updateEventObject, 0, 1);
+        event_active(_updateEventObject, EV_TIMEOUT, 1);
     }
 
 private:
     std::atomic_bool _enabled;
     std::mutex _mutex;
     std::condition_variable _conditionVariable;
-    TasksQueue _queue;
+    TasksQueue _threadQueue;
     ThreadPool _threads;
+    TasksQueue _mainLoopQueue;
     event_base* _base;
+    event* _updateEventObject;
 
 private:
     void threadFunction() {
@@ -138,14 +163,14 @@ private:
             // Ожидаем уведомления, и убедимся что это не ложное пробуждение
             // Поток должен проснуться если очередь не пустая либо он выключен
             auto conditionFunction = [&](){
-                bool enable = (_queue.empty() == false) || (_enabled == false);
+                bool enable = (_threadQueue.empty() == false) || (_enabled == false);
                 return enable;
             };
             _conditionVariable.wait(locker, conditionFunction);
 
             // выдергиваем функцию
-            auto functionObject = _queue.front();
-            _queue.pop();
+            auto functionObject = _threadQueue.front();
+            _threadQueue.pop();
             
             // Разблокируем мютекс перед вызовом функтора
             locker.unlock();
@@ -196,8 +221,7 @@ public:
         Task threadTask = [this, dataBuffer, &managers, clientWeakPtr, fd](){
             
             // тестовая задержка
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
             
             // коллбек в главном потоке после завершения
             managers.tasksHandler->callbackInMainLoop([dataBuffer, clientWeakPtr](){
@@ -208,7 +232,7 @@ public:
                     return;
                 }
                 clientWeakPtr.lock()->sendServerAnswer(dataBuffer);
-            }, fd);
+            });
         };
         managers.tasksHandler->addTaskToQueue(threadTask);
     }
@@ -223,7 +247,7 @@ public:
         evbuffer_add(buf_output, data.data(), data.size());
         
         // прочитали/записали все данные из буффера - очистили
-        //evbuffer_drain(buf_output, data.size());
+        evbuffer_drain(buf_output, data.size());
         
         //bufferevent_flush(_bufferEvent, EV_WRITE, bufferevent_flush_mode::BEV_FLUSH);
     }
