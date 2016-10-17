@@ -83,7 +83,7 @@ public:
             ThreadPtr thread(threadPtrObject, threadDeleteLock);
             
             // задержка старта следующего потока
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
             
             // сохраняем поток
             _threads.push_back(std::move(thread));
@@ -116,7 +116,7 @@ public:
         _updateEventObject = event_new(_base, 0, EV_PERSIST | EV_TIMEOUT, updateEvent, this);
         timeval time;
         time.tv_sec = 0;
-        time.tv_usec = 50;
+        time.tv_usec = 100;
         event_add(_updateEventObject, &time);
     }
 
@@ -125,6 +125,22 @@ public:
         UniqueLock locker(_mutex);
         _threadQueue.push(task);
         _conditionVariable.notify_one();
+    }
+    
+    void syncTaskDispatch(const Task& task){
+        std::condition_variable condVar;
+        std::atomic_bool complete(false);
+        Task taskWrapper = [&](){
+            task();
+            complete = true;
+            condVar.notify_all();
+        };
+        addTaskToQueue(task);
+        
+        if (complete == false) {
+            std::unique_lock<std::mutex> locker(_mutex);
+            condVar.wait(locker);
+        }
     }
 
     size_t getTaskCount(){
@@ -192,6 +208,7 @@ public:
     }
     
     void handleReceivedData(const ServerManagers& managers){
+        LockGuard lock(_mutex);
         
         evbuffer* buf_input = bufferevent_get_input(_bufferEvent);
         //evbuffer* buf_output = bufferevent_get_output(_bufferEvent);
@@ -223,21 +240,26 @@ public:
             // тестовая задержка
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
             
+            // отправка в фоновом потоке
+            sendServerAnswer(dataBuffer);
+            
             // коллбек в главном потоке после завершения
-            managers.tasksHandler->callbackInMainLoop([dataBuffer, clientWeakPtr](){
+            /*managers.tasksHandler->callbackInMainLoop([dataBuffer, clientWeakPtr](){
                 //std::string inputText(dataBuffer.begin(), dataBuffer.end());
                 //printf("Обработал сервер: %s\n", inputText.c_str());
-            
+                
                 if (clientWeakPtr.expired()) {
                     return;
                 }
                 clientWeakPtr.lock()->sendServerAnswer(dataBuffer);
-            });
+            });*/
         };
         managers.tasksHandler->addTaskToQueue(threadTask);
     }
     
     void sendServerAnswer(const std::vector<char>& data){
+        LockGuard lock(_mutex);
+    
         //evbuffer* buf_input = bufferevent_get_input(_bufferEvent);
         evbuffer* buf_output = bufferevent_get_output(_bufferEvent);
     
@@ -442,7 +464,7 @@ int tcpServer() {
     }
     
     // инициализация многопоточности ??
-    //evthread_make_base_notifiable(base);
+    evthread_make_base_notifiable(base);
     
     // коллбек-ивент для периодических событий
     timeval tv;
@@ -470,7 +492,7 @@ int tcpServer() {
     
     // лиснер
     evconnlistener* listener = evconnlistener_new_bind(base, accept_connection_cb, managers.get(),
-                                                       (LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE /*| LEV_OPT_THREADSAFE*/),
+                                                       (LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE | LEV_OPT_THREADSAFE),
                                                        -1, (sockaddr*)&sin, sizeof(sin));
     // проверка ошибки создание листнера
     if(!listener){
