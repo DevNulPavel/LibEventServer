@@ -240,6 +240,10 @@ public:
             // тестовая задержка
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
             
+            if (clientWeakPtr.expired()) {
+                return;
+            }
+            
             // отправка в фоновом потоке
             sendServerAnswer(dataBuffer);
             
