@@ -81,6 +81,11 @@ int multiThreadedTcpServerFilter() {
                 // Читаем данные
                 size_t receivedDataSize = evbuffer_get_length(src);
                 
+                // проверка на большие размеры буффера (10Mb)
+                /*if (receivedDataSize < 1024 * 1024 * 10) {
+                    return bufferevent_filter_result::BEV_NEED_MORE;
+                }*/
+                
                 // если мало данных о размере - ждем
                 if (receivedDataSize < sizeof(DataSizeType)) {
                      return bufferevent_filter_result::BEV_NEED_MORE;
