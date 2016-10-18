@@ -30,8 +30,8 @@
 //using namespace std;
 
 
-typedef std::unique_ptr<event_base, decltype(&event_base_free)>  EventHandler;
-typedef std::unique_ptr<evhttp, decltype(&evhttp_free)> ServerPtr;
+typedef std::unique_ptr<event_base, decltype(&event_base_free)>  EventBasePtr;  // указатель на базовый цикл + функция, вызываемая при уничтожении
+typedef std::unique_ptr<evconnlistener, decltype(&evconnlistener_free)> ServerListenerPtr;  // указатель на сервер + функция, вызываемая при уничтожении
 typedef std::unique_ptr<std::thread, std::function<void(std::thread*)>> ThreadPtr;  // указатель на поток + функция, вызываемая при уничтожении
 typedef std::vector<ThreadPtr> ThreadPool;  // пулл потоков
 typedef std::function<void()> Task;
@@ -477,20 +477,20 @@ int tcpServer() {
     // setup
     //////////////////////////////////////////////////
     // обработчик событий
-    event_base* base = event_base_new();
+    EventBasePtr base(event_base_new(), &event_base_free);
     if(!base){
         fprintf(stderr, "Ошибка при создании объекта event_base.\n" );
         return -1;
     }
     
     // инициализация многопоточности ??
-    evthread_make_base_notifiable(base);
+    evthread_make_base_notifiable(base.get());
     
     // коллбек-ивент для периодических событий
     timeval tv;
     tv.tv_sec = 30;
     tv.tv_usec = 0;
-    event* updateEventObject = event_new(base, fileno(stdin), EV_TIMEOUT | EV_PERSIST, updateEvent, NULL);
+    event* updateEventObject = event_new(base.get(), fileno(stdin), EV_TIMEOUT | EV_PERSIST, updateEvent, NULL);
     event_add(updateEventObject, &tv);
     
     // адрес
@@ -502,7 +502,7 @@ int tcpServer() {
     sin.sin_port = htons(port);
     
     // Многопоточный обработчик задач + Менеджер клиентов
-    std::shared_ptr<ServerTasksHandler> tasksHandler = std::make_shared<ServerTasksHandler>(base, 4);
+    std::shared_ptr<ServerTasksHandler> tasksHandler = std::make_shared<ServerTasksHandler>(base.get(), 4);
     std::shared_ptr<ClientsManager> clientsManager = std::make_shared<ClientsManager>();
     
     // менеджеры
@@ -511,9 +511,10 @@ int tcpServer() {
     managers->clientsManager = clientsManager;
     
     // лиснер
-    evconnlistener* listener = evconnlistener_new_bind(base, accept_connection_cb, managers.get(),
-                                                       (LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE | LEV_OPT_THREADSAFE),
-                                                       -1, (sockaddr*)&sin, sizeof(sin));
+    evconnlistener* listenerPtr = evconnlistener_new_bind(base.get(), accept_connection_cb, managers.get(),
+                                                          (LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE | LEV_OPT_THREADSAFE),
+                                                          -1, (sockaddr*)&sin, sizeof(sin));
+    ServerListenerPtr listener(listenerPtr, &evconnlistener_free);
     // проверка ошибки создание листнера
     if(!listener){
         perror( "Ошибка при создании объекта evconnlistener" );
@@ -521,10 +522,10 @@ int tcpServer() {
     }
     
     // обработчик ошибки
-    evconnlistener_set_error_cb(listener, accept_error_cb );
+    evconnlistener_set_error_cb(listener.get(), accept_error_cb );
     
     // запуск обработки событий
-    event_base_dispatch(base);
+    event_base_dispatch(base.get());
     
     // удаляем менеджеры
     tasksHandler = nullptr;
@@ -533,8 +534,8 @@ int tcpServer() {
     
     // delete all
     event_free(updateEventObject);
-    evconnlistener_free(listener);
-    event_base_free(base);
+    listener = nullptr;
+    base = nullptr;
     
     return 0;
 }

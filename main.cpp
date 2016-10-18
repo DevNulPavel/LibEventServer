@@ -2,6 +2,7 @@
 #include "SingleThreadedHTTP.h"
 #include "MultiThreadedHTTP.h"
 #include "SingleThreadedTCP.h"
+#include "MultiThreadedTCP.h"
 
 // примеры
 // https://habrahabr.ru/post/217437/
@@ -11,7 +12,7 @@
 
 int main()
 {
-    int result = tcpServer();
+    int result = multiThreadedTcpServer();
 
     return result;
 }

@@ -1,5 +1,3 @@
-#ifdef DISABLED
-
 #include "MultiThreadedTCP.h"
 // std
 #include <stdexcept>
@@ -23,7 +21,6 @@
 #include <event.h>
 #include <evhttp.h>
 
-
 // примеры
 // https://habrahabr.ru/post/217437/
 // http://incpp.blogspot.ru/2009/04/libevent.html
@@ -31,9 +28,8 @@
 
 //using namespace std;
 
-
-typedef std::unique_ptr<event_base, decltype(&event_base_free)>  EventHandler;
-typedef std::unique_ptr<evhttp, decltype(&evhttp_free)> ServerPtr;
+typedef std::shared_ptr<event_base>  EventBasePtr;
+typedef std::unique_ptr<evconnlistener, decltype(&evconnlistener_free)> ServerListenerPtr;  // указатель на сервер + функция, вызываемая при уничтожении
 typedef std::unique_ptr<std::thread, std::function<void(std::thread*)>> ThreadPtr;  // указатель на поток + функция, вызываемая при уничтожении
 typedef std::vector<ThreadPtr> ThreadPool;  // пулл потоков
 typedef std::function<void()> Task;
@@ -41,488 +37,197 @@ typedef std::queue<Task> TasksQueue;
 typedef std::lock_guard<std::mutex> LockGuard;
 typedef std::unique_lock<std::mutex> UniqueLock;
 
-//////////////////////////////////////////////////
-// Список менеджеров сервера
-//////////////////////////////////////////////////
-class ServerTasksHandler;
-class ClientsManager;
-struct ServerManagers{
-    std::shared_ptr<ServerTasksHandler> tasksHandler;
-    std::shared_ptr<ClientsManager> clientsManager;
-};
-
-//////////////////////////////////////////////////
-// Многопоточный обработчик запросов
-//////////////////////////////////////////////////
-class ServerTasksHandler{
-public:
-    ServerTasksHandler(event_base* base, int threadsCount):
-        _enabled(true),
-        _base(base),
-        _updateEventObject(nullptr) {
-        
-        createMainLoopCallbacksHandler();
-        creatThreads(threadsCount);
-    }
-    
-    ~ServerTasksHandler(){
-        event_free(_updateEventObject);
-    }
-    
-    void creatThreads(int threadsCount){
-        // не дает завершиться потокам при удалении объекта
-        auto threadDeleteLock = [&] (std::thread *t) {
-            t->join();
-            delete t;
-        };
-        
-        // резервируем память под указатели потоков
-        _threads.reserve(threadsCount);
-        
-        for (int i = 0; i < threadsCount ; ++i) {
-            // создаем обхект потока
-            auto threadPtrObject = new std::thread(std::bind(&ServerTasksHandler::threadFunction, this));
-            ThreadPtr thread(threadPtrObject, threadDeleteLock);
-            
-            // задержка старта следующего потока
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            
-            // сохраняем поток
-            _threads.push_back(std::move(thread));
-        }
-    }
-
-    void createMainLoopCallbacksHandler(){
-        // коллбек таймаута чтения
-        auto updateEvent = [](evutil_socket_t socketFd, short flags, void* arg){
-            ServerTasksHandler* thisObj = (static_cast<ServerTasksHandler*>(arg));
-            TasksQueue& queue = thisObj->_mainLoopQueue;
-            std::mutex& mutex = thisObj->_mutex;
-            
-            // сброс
-            UniqueLock lock(mutex);
-            if (queue.size() == 0) {
-                return;
-            }
-            TasksQueue tasksCopy = queue;
-            queue = TasksQueue();
-            lock.unlock();
-            
-            while (tasksCopy.size() > 0) {
-                Task& task = tasksCopy.front();
-                task();
-                tasksCopy.pop();
-            }
-        };
-        
-        _updateEventObject = event_new(_base, 0, EV_PERSIST | EV_TIMEOUT, updateEvent, this);
-        timeval time;
-        time.tv_sec = 0;
-        time.tv_usec = 100;
-        event_add(_updateEventObject, &time);
-    }
-
-    void addTaskToQueue(const Task& task){
-        // объект блокировки
-        UniqueLock locker(_mutex);
-        _threadQueue.push(task);
-        _conditionVariable.notify_one();
-    }
-    
-    void syncTaskDispatch(const Task& task){
-        std::condition_variable condVar;
-        std::atomic_bool complete(false);
-        Task taskWrapper = [&](){
-            task();
-            complete = true;
-            condVar.notify_all();
-        };
-        addTaskToQueue(task);
-        
-        if (complete == false) {
-            std::unique_lock<std::mutex> locker(_mutex);
-            condVar.wait(locker);
-        }
-    }
-
-    size_t getTaskCount(){
-        UniqueLock locker(_mutex);
-        return _threadQueue.size();
-    }
-    
-    bool isEmpty(){
-        UniqueLock locker(_mutex);
-        return _threadQueue.empty();
-    }
-
-    void callbackInMainLoop(const Task& task){
-        UniqueLock locker(_mutex);
-        _mainLoopQueue.push(task);
-        
-        event_active(_updateEventObject, EV_TIMEOUT, 1);
-    }
-
-private:
-    std::atomic_bool _enabled;
-    std::mutex _mutex;
-    std::condition_variable _conditionVariable;
-    TasksQueue _threadQueue;
-    ThreadPool _threads;
-    TasksQueue _mainLoopQueue;
-    event_base* _base;
-    event* _updateEventObject;
-
-private:
-    void threadFunction() {
-        while (_enabled) {
-            // объект блокировки
-            std::unique_lock<std::mutex> locker(_mutex);
-            
-            // Ожидаем уведомления, и убедимся что это не ложное пробуждение
-            // Поток должен проснуться если очередь не пустая либо он выключен
-            auto conditionFunction = [&](){
-                bool enable = (_threadQueue.empty() == false) || (_enabled == false);
-                return enable;
-            };
-            _conditionVariable.wait(locker, conditionFunction);
-
-            // выдергиваем функцию
-            auto functionObject = _threadQueue.front();
-            _threadQueue.pop();
-            
-            // Разблокируем мютекс перед вызовом функтора
-            locker.unlock();
-            
-            // вызываем функцию
-            functionObject();
-        }
-    }
-};
-
-//////////////////////////////////////////////////
-// Потокобезопасный клиент
-//////////////////////////////////////////////////
-class Client: public std::enable_shared_from_this<Client> {
-public:
-    Client(bufferevent* bufferEvent, evutil_socket_t fd):
-        _bufferEvent(bufferEvent),
-        _fd(fd){
-    }
-    
-    void handleReceivedData(const ServerManagers& managers){
-        LockGuard lock(_mutex);
-        
-        evbuffer* buf_input = bufferevent_get_input(_bufferEvent);
-        //evbuffer* buf_output = bufferevent_get_output(_bufferEvent);
-
-        // буффер для отложенной задачи
-        size_t inputDataLength = evbuffer_get_length(buf_input);
-        std::vector<char> dataBuffer(inputDataLength, 0);
-        
-        // копируем в буффер
-        evbuffer_copyout(buf_input, dataBuffer.data(), inputDataLength);
-        
-        // прочитали/записали все данные из буффера - очистили
-        evbuffer_drain(buf_input, inputDataLength);
-        
-        //std::string inputText(dataBuffer.begin(), dataBuffer.end());
-        //printf("Прочитал сервер: %s\n", inputText.c_str());
-        
-        //bufferevent_flush(_bufferEvent, EV_READ, bufferevent_flush_mode::BEV_FLUSH);
-        
-        startClientTask(managers, dataBuffer);
-    }
-    
-    void startClientTask(const ServerManagers& managers, const std::vector<char>& dataBuffer){
-        std::weak_ptr<Client> clientWeakPtr = shared_from_this();
-        evutil_socket_t fd = clientWeakPtr.lock()->_fd;
-        
-        Task threadTask = [this, dataBuffer, &managers, clientWeakPtr, fd](){
-            
-            // тестовая задержка
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-            
-            if (clientWeakPtr.expired()) {
-                return;
-            }
-            
-            // отправка в фоновом потоке
-            sendServerAnswer(dataBuffer);
-            
-            // коллбек в главном потоке после завершения
-            /*managers.tasksHandler->callbackInMainLoop([dataBuffer, clientWeakPtr](){
-                //std::string inputText(dataBuffer.begin(), dataBuffer.end());
-                //printf("Обработал сервер: %s\n", inputText.c_str());
-                
-                if (clientWeakPtr.expired()) {
-                    return;
-                }
-                clientWeakPtr.lock()->sendServerAnswer(dataBuffer);
-            });*/
-        };
-        managers.tasksHandler->addTaskToQueue(threadTask);
-    }
-    
-    void sendServerAnswer(const std::vector<char>& data){
-        LockGuard lock(_mutex);
-    
-        //evbuffer* buf_input = bufferevent_get_input(_bufferEvent);
-        evbuffer* buf_output = bufferevent_get_output(_bufferEvent);
-    
-        // Данные просто копируются из буфера ввода в буфер вывода
-        evbuffer_add_printf(buf_output, "Server handled: ");
-        // копируем входной буффер
-        evbuffer_add(buf_output, data.data(), data.size());
-        
-        // прочитали/записали все данные из буффера - очистили
-        evbuffer_drain(buf_output, data.size());
-        
-        //bufferevent_flush(_bufferEvent, EV_WRITE, bufferevent_flush_mode::BEV_FLUSH);
-    }
-    
-public:
-    std::mutex _mutex;
-    bufferevent* _bufferEvent;
-    evutil_socket_t _fd;
-};
-
-typedef std::shared_ptr<Client> ClientPtr;
-
-//////////////////////////////////////////////////
-// Потокобезопасный менеджер клиентов
-//////////////////////////////////////////////////
-class ClientsManager{
-public:
-    ClientPtr getClient(bufferevent* buffer){
-        std::lock_guard<std::mutex> lock(_mutex);
-        
-        if (_clients.count(buffer)) {
-            ClientPtr client = _clients[buffer];
-            return client;
-        }
-        return nullptr;
-    }
-    
-    ClientPtr addClient(bufferevent* buffer, evutil_socket_t fd){
-        LockGuard lock(_mutex);
-        
-        ClientPtr client = nullptr;
-        if (_clients.count(buffer) == 0) {
-            client = std::make_shared<Client>(buffer, fd);
-            _clients[buffer] = client;
-        }else{
-            client = _clients[buffer];
-        }
-        
-        return client;
-    }
-    
-    void removeClient(bufferevent* buffer){
-        LockGuard lock(_mutex);
-        if (_clients.count(buffer)) {
-            _clients.erase(buffer);
-        }
-    }
-    
-private:
-    std::mutex _mutex;
-    std::unordered_map<bufferevent*, ClientPtr> _clients;
-    
-private:
-    
-};
-
 
 //////////////////////////////////////////////////
 // TCP Server
 //////////////////////////////////////////////////
-int tcpServer() {
-    //////////////////////////////////////////////////
-    // Callbacks
-    //////////////////////////////////////////////////
-    // обработка принятия соединения
-    auto accept_connection_cb = [](evconnlistener* listener,
-                                   evutil_socket_t fd, sockaddr* addr, int sock_len,
-                                   void* arg) {
-
-        ServerManagers& managers = *(static_cast<ServerManagers*>(arg));
+int multiThreadedTcpServer() {
+    std::uint16_t const serverPort = 5555;
+    int const threadsCount = 1;
+    
+    
+    std::mutex mutex;
+    std::vector<EventBasePtr> events;
+    std::atomic<evutil_socket_t> socket(-1);
+    
+    // Функция в потоке
+    auto threadFunc = [&] (){
+        //////////////////////////////////////////////////
+        // Callbacks
+        //////////////////////////////////////////////////
+        // обработка принятия соединения
+        auto accept_connection_cb = [](evconnlistener* listener,
+                                       evutil_socket_t fd, sockaddr* addr, int sock_len,
+                                       void* arg) {
+            // обработчик ивентов базовый
+            event_base* base = evconnlistener_get_base(listener);
+            
+            // При обработке запроса нового соединения необходимо создать для него объект bufferevent
+            bufferevent* buf_ev = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE /*| BEV_OPT_THREADSAFE | BEV_OPT_DEFER_CALLBACKS | BEV_OPT_UNLOCK_CALLBACKS*/);
+            if (buf_ev == nullptr) {
+                std::cout << "Ошибка при создании объекта bufferevent." << std::endl;
+                return;
+            }
+            
+            // Функция обратного вызова для события: данные готовы для чтения в buf_ev
+            auto echo_read_cb = [](bufferevent* buf_ev, void *arg) {
+                evbuffer* buf_input = bufferevent_get_input(buf_ev);
+                evbuffer* buf_output = bufferevent_get_output(buf_ev);
+                
+                evbuffer_add_printf(buf_output, "Server handled: ");
+                evbuffer_add_buffer(buf_output, buf_input);
+            };
+            
+            // Функция обратного вызова для события: данные готовы для записи в buf_ev
+            auto echo_write_cb = [](bufferevent* buf_ev, void *arg) {
+                //std::cout << "Write callback" << std::endl;
+            };
+            
+            // коллбек обработки ивента
+            auto echo_event_cb = [](bufferevent* buf_ev, short events, void *arg){
+                if(events & BEV_EVENT_READING){
+                    std::cout << "Ошибка во время чтения bufferevent" << std::endl;
+                }
+                if(events & BEV_EVENT_WRITING){
+                    std::cout << "Ошибка во время записи bufferevent" << std::endl;
+                }
+                if(events & BEV_EVENT_ERROR){
+                    std::cout << "Ошибка объекта bufferevent" << std::endl;
+                }
+                if(events & BEV_EVENT_TIMEOUT){
+                    // пишем в буффер об долгом пинге
+                    //evbuffer* buf_output = bufferevent_get_output(buf_ev);
+                    //evbuffer_add_printf(buf_output, "Kick by timeout\n");
+                    // уничтожаем объект буффер
+                    if (buf_ev) {
+                        bufferevent_free(buf_ev);
+                        buf_ev = nullptr;
+                    }
+                    std::cout << "Таймаут bufferevent\n" << std::endl;
+                }
+                if(events & BEV_EVENT_CONNECTED){
+                    std::cout << "Соединение в bufferevent" << std::endl;
+                }
+                if(events & (BEV_EVENT_EOF | BEV_EVENT_ERROR)){
+                    // уничтожаем объект буффер
+                    if (buf_ev) {
+                        bufferevent_free(buf_ev);
+                        buf_ev = nullptr;
+                    }
+                }
+            };
+            
+            // коллбеки обработи
+            bufferevent_setcb(buf_ev, echo_read_cb, echo_write_cb, echo_event_cb, nullptr);
+            bufferevent_enable(buf_ev, (EV_READ | EV_WRITE));
+            // таймауты
+            timeval readWriteTimeout;
+            readWriteTimeout.tv_sec = 600;
+            readWriteTimeout.tv_usec = 0;
+            bufferevent_set_timeouts(buf_ev, &readWriteTimeout, &readWriteTimeout);
+        };
         
-        // обработчик ивентов базовый
-        event_base* base = evconnlistener_get_base(listener);
-        
-        // При обработке запроса нового соединения необходимо создать для него объект bufferevent
-        int bufferEventFlags = BEV_OPT_CLOSE_ON_FREE /*| BEV_OPT_THREADSAFE | BEV_OPT_DEFER_CALLBACKS | BEV_OPT_UNLOCK_CALLBACKS*/;
-        bufferevent* buf_ev = bufferevent_socket_new(base, fd, bufferEventFlags);
-        if (buf_ev == nullptr) {
-            fprintf(stderr, "Ошибка при создании объекта bufferevent.\n");
+        //////////////////////////////////////////////////
+        // Setup
+        //////////////////////////////////////////////////
+        // каждый поток имеет свой объект обработки событий, в однопотоном варианте - это event_init
+        EventBasePtr eventBase(event_base_new(), &event_base_free);
+        if (!eventBase){
+            std::cout << "Ошибка при создании объекта event_base." << std::endl;
             return;
         }
         
-        // создание клиента
-        ClientPtr client = managers.clientsManager->addClient(buf_ev, fd);
+        mutex.lock();
+        events.push_back(eventBase);
+        mutex.unlock();
         
-        // Функция обратного вызова для события: данные готовы для чтения в buf_ev
-        auto echo_read_cb = [](bufferevent* buf_ev, void *arg) {
-            ServerManagers& managers = *(static_cast<ServerManagers*>(arg));
+        // Будущий объект listener
+        evconnlistener* listenerPtr = nullptr;
+        
+        // если у нас есть уже сокет или его еще нету
+        if (socket == -1){
+            // адрес
+            sockaddr_in sin;
+            memset(&sin, 0, sizeof(sin));
+            sin.sin_family = AF_INET;    /* работа с доменом IP-адресов */
+            sin.sin_addr.s_addr = htonl(INADDR_ANY);  /* принимать запросы с любых адресов */
+            sin.sin_port = htons(serverPort);
             
-            ClientPtr client = managers.clientsManager->getClient(buf_ev);
-            if (client) {
-                client->handleReceivedData(managers);
-            }else{
-                perror("Не нашли клиента\n");
+            // Создаем сервер с обработчиком событий
+            listenerPtr = evconnlistener_new_bind(eventBase.get(), accept_connection_cb, nullptr,
+                                                                  (LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE | LEV_OPT_THREADSAFE),
+                                                                  -1, (sockaddr*)&sin, sizeof(sin));
+            if (!listenerPtr){
+                std::cout << "Не получилось создать listener" << std::endl;
+                return;
             }
-        };
         
-        // Функция обратного вызова для события: данные готовы для записи в buf_ev
-        auto echo_write_cb = [](bufferevent* buf_ev, void *arg) {
-            //ClientsManager& clientsManager = *(reinterpret_cast<ClientsManager*>(arg));
+            // сокет создается на основании связки
+            socket = evconnlistener_get_fd(listenerPtr);
+            if (socket == -1){
+                std::cout << "Не получилось получить объект сокет из listener" << std::endl;
+            }
+        } else {
+            // Создаем сервер с обработчиком событий
+            evconnlistener* listenerPtr = evconnlistener_new(eventBase.get(), accept_connection_cb, nullptr,
+                                                             (LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE | LEV_OPT_THREADSAFE),
+                                                             -1, socket);
+            if (!listenerPtr){
+                std::cout << "Не получилось создать listener с сокетом" << std::endl;
+                return;
+            }
+        }
         
-            //std::cout << "Write callback" << std::endl;
-        };
+        // листенер
+        ServerListenerPtr listener(listenerPtr, &evconnlistener_free);
         
-        // коллбек обработки ивента
-        auto echo_event_cb = [](bufferevent* buf_ev, short events, void *arg){
-            ServerManagers& managers = *(static_cast<ServerManagers*>(arg));
+        // запуск (неблокирующий)
+        //event_base_loop(eventBase.get(), EVLOOP_NONBLOCK);
         
-            if(events & BEV_EVENT_READING){
-                perror("Ошибка во время чтения bufferevent\n");
-            }
-            if(events & BEV_EVENT_WRITING){
-                perror("Ошибка во время записи bufferevent\n");
-            }
-            if(events & BEV_EVENT_ERROR){
-                perror("Ошибка объекта bufferevent\n");
-            }
-            if(events & BEV_EVENT_TIMEOUT){
-                // пишем в буффер об долгом пинге
-                //evbuffer* buf_output = bufferevent_get_output(buf_ev);
-                //evbuffer_add_printf(buf_output, "Kick by timeout\n");
-
-                // уничтожаем объект буффер
-                if (buf_ev) {
-                    managers.clientsManager->removeClient(buf_ev);
-                
-                    bufferevent_free(buf_ev);
-                    buf_ev = nullptr;
-                }
-                perror("Таймаут bufferevent\n");
-            }
-            if(events & BEV_EVENT_CONNECTED){
-                perror("Соединение в bufferevent");
-            }
-            if(events & (BEV_EVENT_EOF | BEV_EVENT_ERROR)){
-                // уничтожаем объект буффер
-                if (buf_ev) {
-                    managers.clientsManager->removeClient(buf_ev);
-                    
-                    bufferevent_free(buf_ev);
-                    buf_ev = nullptr;
-                }
-            }
-        };
+        // запуск цикла блокирующий
+        event_base_dispatch(eventBase.get());
         
-        // коллбеки обработи
-        bufferevent_setcb(buf_ev, echo_read_cb, echo_write_cb, echo_event_cb, &managers);
-        bufferevent_enable(buf_ev, (EV_READ | EV_WRITE));
-        // таймауты
-        timeval readWriteTimeout;
-        readWriteTimeout.tv_sec = 600;
-        readWriteTimeout.tv_usec = 0;
-        bufferevent_set_timeouts(buf_ev, &readWriteTimeout, &readWriteTimeout);
+        std::cout << "Выход из цикла обработки" << std::endl;
     };
     
-    // ошибка в принятии соединения
-    auto accept_error_cb = []( struct evconnlistener *listener, void *arg){
-        struct event_base *base = evconnlistener_get_base( listener );
-        int error = EVUTIL_SOCKET_ERROR();
-        fprintf(stderr, "Ошибка %d (%s) в мониторе соединений. Завершение работы.\n",
-                error, evutil_socket_error_to_string( error ) );
-        event_base_loopexit(base, NULL);
+    // пулл потоков
+    ThreadPool threads;
+    threads.reserve(threadsCount);
+    
+    // не дает завершиться потокам
+    auto threadDeleter = [&] (std::thread *t) {
+        t->join();
+        delete t;
     };
     
-    // коллбек таймаута чтения
-    auto updateEvent = [](evutil_socket_t socketFd, short event, void* arg){
-        const char* data = reinterpret_cast<const char*>(arg);
-        printf( "Сокет %d - активные события: %s%s%s%s; %s\n", (int)socketFd,
-               (event & EV_TIMEOUT) ? " таймаут" : "",
-               (event & EV_READ)    ? " чтение"  : "",
-               (event & EV_WRITE)   ? " запись"  : "",
-               (event & EV_SIGNAL)  ? " сигнал"  : "", data);
-        /*
-         if (event & EV_TIMEOUT) {
-         std::cout << "Таймаут события" << std::endl;
-         } else if (event & EV_READ) {
-         std::cout << "Таймаут EV_READ" << std::endl;
-         } else if (event & EV_PERSIST) {
-         std::cout << "Таймаут PERSIST" << std::endl;
-         }
-         */
-    };
+    events.reserve(threadsCount);
     
-    //////////////////////////////////////////////////
-    // setup
-    //////////////////////////////////////////////////
-    // обработчик событий
-    event_base* base = event_base_new();
-    if(!base){
-        fprintf(stderr, "Ошибка при создании объекта event_base.\n" );
-        return -1;
+    for (int i = 0 ; i < threadsCount ; ++i) {
+        ThreadPtr Thread(new std::thread(threadFunc), threadDeleter);
+        
+        // задержка старта следующего потока
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        
+        // сохраняем поток
+        threads.push_back(std::move(Thread));
     }
     
-    // инициализация многопоточности ??
-    evthread_make_base_notifiable(base);
+    // ожидаем нажатия для завершения
+    std::cout << "Press Enter fot quit." << std::endl;
+    std::cin.get();
+    std::cout << "Quit in progress." << std::endl;
     
-    // коллбек-ивент для периодических событий
-    timeval tv;
-    tv.tv_sec = 30;
-    tv.tv_usec = 0;
-    event* updateEventObject = event_new(base, fileno(stdin), EV_TIMEOUT | EV_PERSIST, updateEvent, NULL);
-    event_add(updateEventObject, &tv);
-    
-    // адрес
-    const int port = 5555;
-    sockaddr_in sin;
-    memset(&sin, 0, sizeof(sin));
-    sin.sin_family = AF_INET;    /* работа с доменом IP-адресов */
-    sin.sin_addr.s_addr = htonl(INADDR_ANY);  /* принимать запросы с любых адресов */
-    sin.sin_port = htons(port);
-    
-    // Многопоточный обработчик задач + Менеджер клиентов
-    std::shared_ptr<ServerTasksHandler> tasksHandler = std::make_shared<ServerTasksHandler>(base, 4);
-    std::shared_ptr<ClientsManager> clientsManager = std::make_shared<ClientsManager>();
-    
-    // менеджеры
-    std::shared_ptr<ServerManagers> managers = std::make_shared<ServerManagers>();
-    managers->tasksHandler = tasksHandler;
-    managers->clientsManager = clientsManager;
-    
-    // лиснер
-    evconnlistener* listener = evconnlistener_new_bind(base, accept_connection_cb, managers.get(),
-                                                       (LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE | LEV_OPT_THREADSAFE),
-                                                       -1, (sockaddr*)&sin, sizeof(sin));
-    // проверка ошибки создание листнера
-    if(!listener){
-        perror( "Ошибка при создании объекта evconnlistener" );
-        return -1;
+    // завершение
+    timeval timeVal;
+    timeVal.tv_sec = 5;
+    timeVal.tv_usec = 0;
+    for (const EventBasePtr& event: events) {
+//        event_base_loopexit(event.get(), &timeVal);
+        event_base_loopbreak(event.get());
     }
-    
-    // обработчик ошибки
-    evconnlistener_set_error_cb(listener, accept_error_cb );
-    
-    // запуск обработки событий
-    event_base_dispatch(base);
-    
-    // удаляем менеджеры
-    tasksHandler = nullptr;
-    clientsManager = nullptr;
-    managers = nullptr;
-    
-    // delete all
-    event_free(updateEventObject);
-    evconnlistener_free(listener);
-    event_base_free(base);
+    events.clear();
+    threads.clear();
     
     return 0;
 }
 
-#endif

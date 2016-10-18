@@ -1,5 +1,3 @@
-#ifdef DISABLED
 
-int tcpServer();
+int multiThreadedTcpServer();
 
-#endif
