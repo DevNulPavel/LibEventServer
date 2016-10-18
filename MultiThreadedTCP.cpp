@@ -75,24 +75,41 @@ int multiThreadedTcpServer() {
             auto echo_read_cb = [](bufferevent* buf_ev, void *arg) {
                 evbuffer* buf_input = bufferevent_get_input(buf_ev);
                 evbuffer* buf_output = bufferevent_get_output(buf_ev);
-                
+
                 // Читаем данные
-                size_t inSize = evbuffer_get_length(buf_input);
+                size_t receivedDataSize = evbuffer_get_length(buf_input);
                 
-                // если мало данных - ждем
-                if (inSize < 5) {
+                // размер информации о размере
+                typedef char DataSizeType;
+                
+                // если мало данных о размере - ждем
+                if (receivedDataSize < sizeof(DataSizeType)) {
+                    return;
+                }
+
+                int64_t dataSize = 0;
+                evbuffer_copyout(buf_input, &dataSize, sizeof(DataSizeType));
+
+                // если мало данных в буффере - ждем еще
+                if (receivedDataSize < (sizeof(DataSizeType) + dataSize)) {
                     return;
                 }
                 
+                // удаляем данные о размере из начала
+                evbuffer_drain(buf_input, sizeof(DataSizeType));
+                
+                // новый размер буффера
+                receivedDataSize = evbuffer_get_length(buf_input);
+                
                 // временная область с данными
                 std::vector<char> dataBuffer;
-                dataBuffer.resize(inSize);
+                dataBuffer.resize(receivedDataSize);
                 
                 // копируем
-                evbuffer_copyout(buf_input, dataBuffer.data(), inSize);
+                evbuffer_copyout(buf_input, dataBuffer.data(), receivedDataSize);
                 
                 // чистим входной буффер
-                evbuffer_drain(buf_input, inSize);
+                evbuffer_drain(buf_input, receivedDataSize);
                 
                 
                 // искусственная задержка
@@ -245,8 +262,13 @@ int multiThreadedTcpServer() {
     }
     
     // ожидаем нажатия для завершения
-    std::cout << "Press Enter fot quit." << std::endl;
-    std::cin.get();
+    std::cout << "Write \"Exit\" fot quit." << std::endl;
+    std::string text;
+    std::cin >> text;
+    while (text.find("Exit") == std::string::npos) {
+        text.clear();
+        std::cin >> text;
+    }
     std::cout << "Quit in progress." << std::endl;
     
     // завершение
