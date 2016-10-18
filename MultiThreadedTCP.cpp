@@ -47,6 +47,8 @@ int multiThreadedTcpServer() {
     
     
     std::mutex mutex;
+    std::condition_variable condVar;
+    std::atomic_bool isActive(true);
     std::vector<EventBasePtr> events;
     std::atomic<evutil_socket_t> socket(-1);
     
@@ -73,6 +75,9 @@ int multiThreadedTcpServer() {
             auto echo_read_cb = [](bufferevent* buf_ev, void *arg) {
                 evbuffer* buf_input = bufferevent_get_input(buf_ev);
                 evbuffer* buf_output = bufferevent_get_output(buf_ev);
+                
+                // искусственная задержка
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
                 
                 evbuffer_add_printf(buf_output, "Server handled: ");
                 evbuffer_add_buffer(buf_output, buf_input);
@@ -182,7 +187,7 @@ int multiThreadedTcpServer() {
         ServerListenerPtr listener(listenerPtr, &evconnlistener_free);
         
         // запуск (неблокирующий)
-        //event_base_loop(eventBase.get(), EVLOOP_NONBLOCK);
+//        event_base_loop(eventBase.get(), EVLOOP_NONBLOCK);
         
         // запуск цикла блокирующий
         event_base_dispatch(eventBase.get());
@@ -222,8 +227,8 @@ int multiThreadedTcpServer() {
     timeVal.tv_sec = 5;
     timeVal.tv_usec = 0;
     for (const EventBasePtr& event: events) {
-//        event_base_loopexit(event.get(), &timeVal);
-        event_base_loopbreak(event.get());
+        event_base_loopexit(event.get(), &timeVal);
+        //event_base_loopbreak(event.get());
     }
     events.clear();
     threads.clear();

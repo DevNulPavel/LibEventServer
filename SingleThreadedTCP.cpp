@@ -157,7 +157,8 @@ public:
         UniqueLock locker(_mutex);
         _mainLoopQueue.push(task);
         
-        event_active(_updateEventObject, EV_WRITE | EV_READ | EV_PERSIST, 0);
+        event_base_loop(_base, EVLOOP_NONBLOCK);
+        //event_active(_updateEventObject, EV_WRITE | EV_READ | EV_PERSIST, 0);
     }
 
 private:
