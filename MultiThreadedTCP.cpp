@@ -43,7 +43,7 @@ typedef std::unique_lock<std::mutex> UniqueLock;
 //////////////////////////////////////////////////
 int multiThreadedTcpServer() {
     std::uint16_t const serverPort = 5555;
-    int const threadsCount = 1;
+    int const threadsCount = 16;
     
     
     std::mutex mutex;
@@ -233,7 +233,7 @@ int multiThreadedTcpServer() {
         // запуск (неблокирующий)
 //        event_base_loop(eventBase.get(), EVLOOP_NONBLOCK);
         
-        // запуск цикла блокирующий
+        // запуск цикла - блокирующий
         event_base_dispatch(eventBase.get());
         
         std::cout << "Выход из цикла обработки" << std::endl;
@@ -273,14 +273,16 @@ int multiThreadedTcpServer() {
     
     // завершение
     timeval timeVal;
-    timeVal.tv_sec = 5;
-    timeVal.tv_usec = 0;
+    timeVal.tv_sec = 0;
+    timeVal.tv_usec = 500;
     for (const EventBasePtr& event: events) {
         event_base_loopexit(event.get(), &timeVal);
         //event_base_loopbreak(event.get());
     }
     events.clear();
     threads.clear();
+    
+    std::cout << "Quit complete." << std::endl;
     
     return 0;
 }
