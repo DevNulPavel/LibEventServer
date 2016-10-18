@@ -76,11 +76,38 @@ int multiThreadedTcpServer() {
                 evbuffer* buf_input = bufferevent_get_input(buf_ev);
                 evbuffer* buf_output = bufferevent_get_output(buf_ev);
                 
+                // Читаем данные
+                size_t inSize = evbuffer_get_length(buf_input);
+                
+                // если мало данных - ждем
+                if (inSize < 5) {
+                    return;
+                }
+                
+                // временная область с данными
+                std::vector<char> dataBuffer;
+                dataBuffer.resize(inSize);
+                
+                // копируем
+                evbuffer_copyout(buf_input, dataBuffer.data(), inSize);
+                
+                // чистим входной буффер
+                evbuffer_drain(buf_input, inSize);
+                
+                
                 // искусственная задержка
-                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+                
+                
+                // выводим данные
+                size_t outSize = evbuffer_get_length(buf_output);
                 
                 evbuffer_add_printf(buf_output, "Server handled: ");
-                evbuffer_add_buffer(buf_output, buf_input);
+                evbuffer_add(buf_output, dataBuffer.data(), dataBuffer.size());
+                
+                // чистим выходной буффер
+                evbuffer_drain(buf_output, outSize);
+                
             };
             
             // Функция обратного вызова для события: данные готовы для записи в buf_ev
