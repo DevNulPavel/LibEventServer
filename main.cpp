@@ -3,6 +3,7 @@
 #include "MultiThreadedHTTP.h"
 #include "SingleThreadedTCP.h"
 #include "MultiThreadedTCP.h"
+#include "MultiThreadedTCPFilter.h"
 
 // примеры
 // https://habrahabr.ru/post/217437/
@@ -12,7 +13,7 @@
 
 int main()
 {
-    int result = multiThreadedTcpServer();
+    int result = multiThreadedTcpServerFilter();
 
     return result;
 }

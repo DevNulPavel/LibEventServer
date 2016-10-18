@@ -26,6 +26,7 @@
 // http://incpp.blogspot.ru/2009/04/libevent.html
 // https://www.ibm.com/developerworks/ru/library/l-Libevent1/
 // работа с буфферами - http://www.wangafu.net/~nickm/libevent-book/Ref6_bufferevent.html
+//                      http://www.wangafu.net/~nickm/libevent-book/Ref6a_advanced_bufferevents.html
 
 //using namespace std;
 
@@ -42,7 +43,7 @@ typedef std::unique_lock<std::mutex> UniqueLock;
 //////////////////////////////////////////////////
 // TCP Server
 //////////////////////////////////////////////////
-int multiThreadedTcpServer() {
+int multiThreadedTcpServerFilter() {
     std::uint16_t const serverPort = 5555;
     int const threadsCount = 16;
     
@@ -66,41 +67,64 @@ int multiThreadedTcpServer() {
             event_base* base = evconnlistener_get_base(listener);
             
             // При обработке запроса нового соединения необходимо создать для него объект bufferevent
-            bufferevent* buf_ev = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE /*| BEV_OPT_THREADSAFE | BEV_OPT_DEFER_CALLBACKS | BEV_OPT_UNLOCK_CALLBACKS*/);
-            if (buf_ev == nullptr) {
+            bufferevent* buf_ev_classic = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE /*| BEV_OPT_THREADSAFE | BEV_OPT_DEFER_CALLBACKS | BEV_OPT_UNLOCK_CALLBACKS*/);
+            if (buf_ev_classic == nullptr) {
                 std::cout << "Ошибка при создании объекта bufferevent." << std::endl;
                 return;
             }
             
+            // размер информации о размере
+            typedef char DataSizeType;
+            
+            // обертка-фильтр
+            auto inputFilter = [](evbuffer *src, evbuffer *dst, ev_ssize_t dst_limit, bufferevent_flush_mode mode, void *ctx)-> bufferevent_filter_result {
+                // Читаем данные
+                size_t receivedDataSize = evbuffer_get_length(src);
+                
+                // если мало данных о размере - ждем
+                if (receivedDataSize < sizeof(DataSizeType)) {
+                     return bufferevent_filter_result::BEV_NEED_MORE;
+                }
+                
+                int64_t dataSize = 0;
+                evbuffer_copyout(src, &dataSize, sizeof(DataSizeType));
+                
+                // если мало данных в буффере - ждем еще
+                if (receivedDataSize < (sizeof(DataSizeType) + dataSize)) {
+                    return bufferevent_filter_result::BEV_NEED_MORE;
+                }
+                
+                // удаляем данные о размере из начала
+                evbuffer_drain(src, sizeof(DataSizeType));
+                // TODO: копируем в выходной буффер (или перемещаем?????)
+                evbuffer_add_buffer(dst, src);
+                
+                return bufferevent_filter_result::BEV_OK;
+            };
+            auto outFilter = [](evbuffer *src, evbuffer *dst, ev_ssize_t dst_limit, bufferevent_flush_mode mode, void *ctx)-> bufferevent_filter_result {
+            
+                // добавление информации о размере в начало
+                DataSizeType dataSize = evbuffer_get_length(src);
+                // TODO: копируем в выходной буффер (или перемещаем?????)
+                evbuffer_add(dst, &dataSize, sizeof(DataSizeType));
+                evbuffer_add_buffer(dst, src);
+                
+                return bufferevent_filter_result::BEV_OK;
+            };
+            auto filterDestroyCallback = [](void*){
+            };
+            bufferevent* buf_ev = bufferevent_filter_new(buf_ev_classic, inputFilter, outFilter, 0, filterDestroyCallback, nullptr);
+            if (buf_ev_classic == nullptr) {
+                std::cout << "Ошибка при создании ФИЛЬТРУЮЩЕГО объекта bufferevent." << std::endl;
+                return;
+            }
             // Функция обратного вызова для события: данные готовы для чтения в buf_ev
             auto echo_read_cb = [](bufferevent* buf_ev, void *arg) {
                 evbuffer* buf_input = bufferevent_get_input(buf_ev);
                 evbuffer* buf_output = bufferevent_get_output(buf_ev);
                 
-                // Читаем данные
-                size_t receivedDataSize = evbuffer_get_length(buf_input);
-                
-                // размер информации о размере
-                typedef char DataSizeType;
-                
-                // если мало данных о размере - ждем
-                if (receivedDataSize < sizeof(DataSizeType)) {
-                    return;
-                }
-
-                int64_t dataSize = 0;
-                evbuffer_copyout(buf_input, &dataSize, sizeof(DataSizeType));
-
-                // если мало данных в буффере - ждем еще
-                if (receivedDataSize < (sizeof(DataSizeType) + dataSize)) {
-                    return;
-                }
-                
-                // удаляем данные о размере из начала
-                evbuffer_drain(buf_input, sizeof(DataSizeType));
-                
                 // новый размер буффера
-                receivedDataSize = evbuffer_get_length(buf_input);
+                size_t receivedDataSize = evbuffer_get_length(buf_input);
                 
                 // временная область с данными
                 std::vector<char> dataBuffer;
@@ -171,8 +195,8 @@ int multiThreadedTcpServer() {
             bufferevent_setcb(buf_ev, echo_read_cb, echo_write_cb, echo_event_cb, nullptr);
             bufferevent_enable(buf_ev, (EV_READ | EV_WRITE));
             // размеры буффера для вызова коллбеков
-            bufferevent_setwatermark(buf_ev, EV_READ, 20, 0);   // 20+
-            bufferevent_setwatermark(buf_ev, EV_WRITE, 20, 0);   // 20+
+            bufferevent_setwatermark(buf_ev, EV_READ, 2, 0);   // 2+
+            bufferevent_setwatermark(buf_ev, EV_WRITE, 2, 0);   // 20+
             // таймауты
             timeval readWriteTimeout;
             readWriteTimeout.tv_sec = 600;
