@@ -113,10 +113,10 @@ public:
             }
         };
         
-        _updateEventObject = event_new(_base, 0, EV_PERSIST | EV_TIMEOUT, updateEvent, this);
+        _updateEventObject = event_new(_base, -1, EV_PERSIST | EV_READ | EV_WRITE, updateEvent, this);
         timeval time;
         time.tv_sec = 0;
-        time.tv_usec = 100;
+        time.tv_usec = 50;
         event_add(_updateEventObject, &time);
     }
 
@@ -157,7 +157,7 @@ public:
         UniqueLock locker(_mutex);
         _mainLoopQueue.push(task);
         
-        event_active(_updateEventObject, EV_TIMEOUT, 1);
+        event_active(_updateEventObject, EV_WRITE | EV_READ | EV_PERSIST, 0);
     }
 
 private:
@@ -203,14 +203,14 @@ private:
 class Client: public std::enable_shared_from_this<Client> {
 public:
     Client(std::mutex& mutex, bufferevent* bufferEvent, evutil_socket_t fd):
-        _mutex(mutex),
+        _parentMutex(mutex),
         _bufferEvent(bufferEvent),
         _fd(fd){
     }
     
     void handleReceivedData(const ServerManagers& managers){
         // блокировка чтения из разных потоков
-        UniqueLock lock(_mutex);
+        UniqueLock lock(_bufferMutex);
         
         evbuffer* buf_input = bufferevent_get_input(_bufferEvent);
         //evbuffer* buf_output = bufferevent_get_output(_bufferEvent);
@@ -236,7 +236,7 @@ public:
     }
     
     void startClientTask(const ServerManagers& managers, const std::vector<char>& dataBuffer){
-        UniqueLock lock(_mutex);
+        UniqueLock lock(_parentMutex);
         std::weak_ptr<Client> clientWeakPtr = shared_from_this();
         evutil_socket_t fd = clientWeakPtr.lock()->_fd;
         lock.unlock();
@@ -246,7 +246,8 @@ public:
             // тестовая задержка
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
             
-            UniqueLock lock(_mutex);
+            // Проверка удаления
+            UniqueLock lock(_parentMutex);
             if (clientWeakPtr.expired()) {
                 return;
             }
@@ -270,8 +271,8 @@ public:
     }
     
     void sendServerAnswer(const std::vector<char>& data){
-        // блокировка записей из разных потоков
-        LockGuard lock(_mutex);
+        // блокировка записей из разных потоков + блокировка удаления у родителя
+        LockGuard lock(_bufferMutex);
     
         //evbuffer* buf_input = bufferevent_get_input(_bufferEvent);
         evbuffer* buf_output = bufferevent_get_output(_bufferEvent);
@@ -288,7 +289,8 @@ public:
     }
     
 public:
-    std::mutex& _mutex;
+    std::mutex _bufferMutex;
+    std::mutex& _parentMutex;
     bufferevent* _bufferEvent;
     evutil_socket_t _fd;
 };
@@ -327,7 +329,12 @@ public:
     void removeClient(bufferevent* buffer){
         LockGuard lock(_mutex);
         if (_clients.count(buffer)) {
+            ClientPtr client = _clients[buffer];
+            
+            // чтобы не удалился при чтении и записи
+            UniqueLock lock(client->_bufferMutex);
             _clients.erase(buffer);
+            lock.unlock();
         }
     }
     
