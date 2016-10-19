@@ -12,6 +12,7 @@
 #include <string>
 #include <list>
 #include <unordered_map>
+#include <set>
 // libevent
 #include <event2/listener.h>
 #include <event2/bufferevent.h>
@@ -40,6 +41,12 @@ typedef std::lock_guard<std::mutex> LockGuard;
 typedef std::unique_lock<std::mutex> UniqueLock;
 
 
+// для проверки балансировки нагрузки по потокам
+// листнеры будут включаться по очереди - балансируя потоки по очереди
+std::mutex listenersMutex;
+std::queue<evconnlistener*> freeListeners;
+
+
 //////////////////////////////////////////////////
 // TCP Server
 //////////////////////////////////////////////////
@@ -63,6 +70,7 @@ int multiThreadedTcpServerFilter() {
         auto accept_connection_cb = [](evconnlistener* listener,
                                        evutil_socket_t fd, sockaddr* addr, int sock_len,
                                        void* arg) {
+
             // обработчик ивентов базовый
             event_base* base = evconnlistener_get_base(listener);
             
@@ -187,7 +195,7 @@ int multiThreadedTcpServerFilter() {
             };
             
             // коллбеки обработи
-            bufferevent_setcb(buf_ev, echo_read_cb, echo_write_cb, echo_event_cb, nullptr);
+            bufferevent_setcb(buf_ev, echo_read_cb, echo_write_cb, echo_event_cb, (void*)listener);
             bufferevent_enable(buf_ev, (EV_READ | EV_WRITE));
             // размеры буффера для вызова коллбеков
             //bufferevent_setwatermark(buf_ev, EV_READ, 2, 0);   // 2+
