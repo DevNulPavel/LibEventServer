@@ -80,13 +80,17 @@ set (HEADERS
 		"MultiThreadedHTTP.h"
 		"SingleThreadedTCP.h"
 		"MultiThreadedTCP.h"
-		"MultiThreadedTCPFilter.h")
+		"MultiThreadedTCPFilter.h"
+		"SingleThreadedDNS.h"
+		"SingleThreadedDNSResponder.h")
 set (SOURCES
 		"SingleThreadedHTTP.cpp"
 		"MultiThreadedHTTP.cpp"
 		"SingleThreadedTCP.cpp"
 		"MultiThreadedTCP.cpp"
 		"MultiThreadedTCPFilter.cpp"
+		"SingleThreadedDNS.cpp"
+		"SingleThreadedDNSResponder.cpp"
 		"main.cpp")
 
 # создаем группу, чтобы заголовочники и исходники были в одной папке

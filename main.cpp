@@ -4,6 +4,8 @@
 #include "SingleThreadedTCP.h"
 #include "MultiThreadedTCP.h"
 #include "MultiThreadedTCPFilter.h"
+#include "SingleThreadedDNS.h"
+#include "SingleThreadedDNSResponder.h"
 
 // примеры
 // https://habrahabr.ru/post/217437/

@@ -228,7 +228,7 @@ int multiThreadedTcpServerFilter() {
             
             // Создаем сервер с обработчиком событий
             listenerPtr = evconnlistener_new_bind(eventBase.get(), accept_connection_cb, nullptr,
-                                                                  (LEV_OPT_LEAVE_SOCKETS_BLOCKING | LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE | LEV_OPT_THREADSAFE),
+                                                                  (/*LEV_OPT_LEAVE_SOCKETS_BLOCKING | */LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE | LEV_OPT_THREADSAFE),
                                                                   -1, (sockaddr*)&sin, sizeof(sin));
             if (!listenerPtr){
                 std::cout << "Не получилось создать listener" << std::endl;
@@ -243,7 +243,7 @@ int multiThreadedTcpServerFilter() {
         } else {
             // Создаем сервер с обработчиком событий
             evconnlistener* listenerPtr = evconnlistener_new(eventBase.get(), accept_connection_cb, nullptr,
-                                                             (LEV_OPT_LEAVE_SOCKETS_BLOCKING | LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE | LEV_OPT_THREADSAFE),
+                                                             (/*LEV_OPT_LEAVE_SOCKETS_BLOCKING | */LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE | LEV_OPT_THREADSAFE),
                                                              -1, socket);
             if (!listenerPtr){
                 std::cout << "Не получилось создать listener с сокетом" << std::endl;
