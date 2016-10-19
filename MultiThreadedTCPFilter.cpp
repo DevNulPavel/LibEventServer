@@ -45,7 +45,7 @@ typedef std::unique_lock<std::mutex> UniqueLock;
 //////////////////////////////////////////////////
 int multiThreadedTcpServerFilter() {
     std::uint16_t const serverPort = 5555;
-    int const threadsCount = 8;
+    int const threadsCount = 2;
     
     
     std::mutex mutex;
@@ -199,6 +199,10 @@ int multiThreadedTcpServerFilter() {
             bufferevent_set_timeouts(buf_ev, &readWriteTimeout, &readWriteTimeout);
         };
         
+        auto listenerErrorCallback = [](struct evconnlistener *, void *){
+            std::cout << "Коллбек ошибки листнера" << std::endl;
+        };
+        
         //////////////////////////////////////////////////
         // Setup
         //////////////////////////////////////////////////
@@ -234,12 +238,16 @@ int multiThreadedTcpServerFilter() {
                 std::cout << "Не получилось создать listener" << std::endl;
                 return;
             }
+            
+            // коллбек отвала соединения
+            evconnlistener_set_error_cb(listenerPtr, listenerErrorCallback);
         
             // сокет создается на основании связки
             socket = evconnlistener_get_fd(listenerPtr);
             if (socket == -1){
                 std::cout << "Не получилось получить объект сокет из listener" << std::endl;
             }
+            
         } else {
             // Создаем сервер с обработчиком событий
             evconnlistener* listenerPtr = evconnlistener_new(eventBase.get(), accept_connection_cb, nullptr,
@@ -249,6 +257,9 @@ int multiThreadedTcpServerFilter() {
                 std::cout << "Не получилось создать listener с сокетом" << std::endl;
                 return;
             }
+            
+            // коллбек отвала соединения
+            evconnlistener_set_error_cb(listenerPtr, listenerErrorCallback);
         }
         lock.unlock();
         
@@ -278,6 +289,8 @@ int multiThreadedTcpServerFilter() {
     
     for (int i = 0 ; i < threadsCount ; ++i) {
         ThreadPtr Thread(new std::thread(threadFunc), threadDeleter);
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         
         // сохраняем поток
         threads.push_back(std::move(Thread));
