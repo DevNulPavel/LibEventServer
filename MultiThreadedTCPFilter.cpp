@@ -45,7 +45,7 @@ typedef std::unique_lock<std::mutex> UniqueLock;
 //////////////////////////////////////////////////
 int multiThreadedTcpServerFilter() {
     std::uint16_t const serverPort = 5555;
-    int const threadsCount = 16;
+    int const threadsCount = 8;
     
     
     std::mutex mutex;
@@ -82,10 +82,10 @@ int multiThreadedTcpServerFilter() {
                 size_t receivedDataSize = evbuffer_get_length(src);
                 
                 // проверка на большие размеры буффера (10Mb)
-                /*if (receivedDataSize < 1024 * 1024 * 10) {
-                    return bufferevent_filter_result::BEV_NEED_MORE;
-                }*/
-                
+//                if (receivedDataSize < 1024 * 1024 * 10) {
+//                    return bufferevent_filter_result::BEV_NEED_MORE;
+//                }
+
                 // если мало данных о размере - ждем
                 if (receivedDataSize < sizeof(DataSizeType)) {
                      return bufferevent_filter_result::BEV_NEED_MORE;
@@ -101,6 +101,7 @@ int multiThreadedTcpServerFilter() {
                 
                 // удаляем данные о размере из начала
                 evbuffer_drain(src, sizeof(DataSizeType));
+
                 // TODO: копируем в выходной буффер (или перемещаем?????)
                 evbuffer_add_buffer(dst, src);
                 
@@ -128,33 +129,27 @@ int multiThreadedTcpServerFilter() {
                 evbuffer* buf_input = bufferevent_get_input(buf_ev);
                 evbuffer* buf_output = bufferevent_get_output(buf_ev);
                 
-                // новый размер буффера
+                // входные данные
                 size_t receivedDataSize = evbuffer_get_length(buf_input);
-                
                 // временная область с данными
                 std::vector<char> dataBuffer;
                 dataBuffer.resize(receivedDataSize);
-                
                 // копируем
                 evbuffer_copyout(buf_input, dataBuffer.data(), receivedDataSize);
-                
                 // чистим входной буффер
                 evbuffer_drain(buf_input, receivedDataSize);
                 
                 
                 // искусственная задержка
-                std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+                //std::this_thread::sleep_for(std::chrono::milliseconds(5000));
                 
                 
                 // выводим данные
                 size_t outSize = evbuffer_get_length(buf_output);
-                
                 evbuffer_add_printf(buf_output, "Server handled: ");
                 evbuffer_add(buf_output, dataBuffer.data(), dataBuffer.size());
-                
                 // чистим выходной буффер
                 evbuffer_drain(buf_output, outSize);
-                
             };
             
             // Функция обратного вызова для события: данные готовы для записи в buf_ev
@@ -177,11 +172,6 @@ int multiThreadedTcpServerFilter() {
                     // пишем в буффер об долгом пинге
                     //evbuffer* buf_output = bufferevent_get_output(buf_ev);
                     //evbuffer_add_printf(buf_output, "Kick by timeout\n");
-                    // уничтожаем объект буффер
-                    if (buf_ev) {
-                        bufferevent_free(buf_ev);
-                        buf_ev = nullptr;
-                    }
                     std::cout << "Таймаут bufferevent\n" << std::endl;
                 }
                 if(events & BEV_EVENT_CONNECTED){
@@ -200,8 +190,8 @@ int multiThreadedTcpServerFilter() {
             bufferevent_setcb(buf_ev, echo_read_cb, echo_write_cb, echo_event_cb, nullptr);
             bufferevent_enable(buf_ev, (EV_READ | EV_WRITE));
             // размеры буффера для вызова коллбеков
-            bufferevent_setwatermark(buf_ev, EV_READ, 2, 0);   // 2+
-            bufferevent_setwatermark(buf_ev, EV_WRITE, 2, 0);   // 20+
+            //bufferevent_setwatermark(buf_ev, EV_READ, 2, 0);   // 2+
+            //bufferevent_setwatermark(buf_ev, EV_WRITE, 2, 0);   // 20+
             // таймауты
             timeval readWriteTimeout;
             readWriteTimeout.tv_sec = 600;
@@ -227,6 +217,7 @@ int multiThreadedTcpServerFilter() {
         evconnlistener* listenerPtr = nullptr;
         
         // если у нас есть уже сокет или его еще нету
+        UniqueLock lock(mutex); // чтобы несколкьо потоков не пытались создать соединение одновременно
         if (socket == -1){
             // адрес
             sockaddr_in sin;
@@ -237,7 +228,7 @@ int multiThreadedTcpServerFilter() {
             
             // Создаем сервер с обработчиком событий
             listenerPtr = evconnlistener_new_bind(eventBase.get(), accept_connection_cb, nullptr,
-                                                                  (LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE | LEV_OPT_THREADSAFE),
+                                                                  (LEV_OPT_LEAVE_SOCKETS_BLOCKING | LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE | LEV_OPT_THREADSAFE),
                                                                   -1, (sockaddr*)&sin, sizeof(sin));
             if (!listenerPtr){
                 std::cout << "Не получилось создать listener" << std::endl;
@@ -252,13 +243,14 @@ int multiThreadedTcpServerFilter() {
         } else {
             // Создаем сервер с обработчиком событий
             evconnlistener* listenerPtr = evconnlistener_new(eventBase.get(), accept_connection_cb, nullptr,
-                                                             (LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE | LEV_OPT_THREADSAFE),
+                                                             (LEV_OPT_LEAVE_SOCKETS_BLOCKING | LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE | LEV_OPT_THREADSAFE),
                                                              -1, socket);
             if (!listenerPtr){
                 std::cout << "Не получилось создать listener с сокетом" << std::endl;
                 return;
             }
         }
+        lock.unlock();
         
         // листенер
         ServerListenerPtr listener(listenerPtr, &evconnlistener_free);
@@ -287,9 +279,6 @@ int multiThreadedTcpServerFilter() {
     for (int i = 0 ; i < threadsCount ; ++i) {
         ThreadPtr Thread(new std::thread(threadFunc), threadDeleter);
         
-        // задержка старта следующего потока
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        
         // сохраняем поток
         threads.push_back(std::move(Thread));
     }
@@ -301,6 +290,7 @@ int multiThreadedTcpServerFilter() {
     while (text.find("Exit") == std::string::npos) {
         text.clear();
         std::cin >> text;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
     std::cout << "Quit in progress." << std::endl;
     

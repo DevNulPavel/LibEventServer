@@ -59,7 +59,7 @@ public:
         _base(base),
         _updateEventObject(nullptr) {
         
-        createMainLoopCallbacksHandler();
+        //createMainLoopCallbacksHandler();
         creatThreads(threadsCount);
     }
     
@@ -245,7 +245,7 @@ public:
         Task threadTask = [this, dataBuffer, &managers, clientWeakPtr, fd](){
             
             // тестовая задержка
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            //std::this_thread::sleep_for(std::chrono::milliseconds(1000));
             
             // Проверка удаления
             UniqueLock lock(_parentMutex);
@@ -503,7 +503,7 @@ int tcpServer() {
     sin.sin_port = htons(port);
     
     // Многопоточный обработчик задач + Менеджер клиентов
-    std::shared_ptr<ServerTasksHandler> tasksHandler = std::make_shared<ServerTasksHandler>(base.get(), 4);
+    std::shared_ptr<ServerTasksHandler> tasksHandler = std::make_shared<ServerTasksHandler>(base.get(), 8);
     std::shared_ptr<ClientsManager> clientsManager = std::make_shared<ClientsManager>();
     
     // менеджеры
